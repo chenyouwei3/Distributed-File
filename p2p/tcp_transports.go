@@ -20,24 +20,38 @@ func NewTCPPeer(conn net.Conn, outbound bool) *TCPPeer {
 	}
 }
 
+// Close 实现interface的接口
+func (p *TCPPeer) Close() error {
+	return p.conn.Close()
+}
+
+// TCPTransportOps TCP传输的配置参数
 type TCPTransportOps struct {
 	ListenAddr    string // 监听地址
 	HandshakeFunc HandshakeFunc
 	Decoder       Decoder //解码器
+	OnPeer        func(Peer) error
 }
 
+// TCPTransport TCP传输的结构体
 type TCPTransport struct {
 	TCPTransportOps
-	Listener net.Listener      // TCP 监听器
-	mu       sync.RWMutex      // 读写锁，用于保护并发访问 prees
-	prees    map[net.Addr]Peer // 保存地址到 Peer 的映射
+	Listener net.Listener // TCP 监听器
+	rpcch    chan RPC
+	mu       sync.RWMutex // 读写锁，用于保护并发访问 prees
 }
 
 // NewTCPTransport 创建一个新的 TCPTransport 实例并初始化
 func NewTCPTransport(opts TCPTransportOps) *TCPTransport {
 	return &TCPTransport{
 		TCPTransportOps: opts,
+		rpcch:           make(chan RPC),
 	}
+}
+
+// Consume 返回消费者channel 返回已读内容的唯一通道
+func (t *TCPTransport) Consume() <-chan RPC {
+	return t.rpcch
 }
 
 // ListenAndAccept 开始监听指定地址并接收传入的连接
@@ -64,30 +78,37 @@ func (t *TCPTransport) startAcceptLoop() {
 }
 
 func (t *TCPTransport) handleConn(conn net.Conn) {
+	var err error
+	defer func() {
+		fmt.Printf("dropping peer connection:%s", err)
+		conn.Close()
+	}()
 	peer := NewTCPPeer(conn, true) //客户端向我们传输东西
-
 	if err := t.HandshakeFunc(peer); err != nil {
 		conn.Close()
 		fmt.Printf("TCP handshake error:%s\n", err)
 		return
 	}
-
-	msg := &Message{}
+	if t.OnPeer != nil {
+		if err = t.OnPeer(peer); err != nil {
+			return
+		}
+	}
+	rpc := RPC{}
 	//buf := make([]byte, 2000)
 	//读取连接
+	//1.24.34
 	for {
 		//n, err := conn.Read(buf)
 		//if err != nil {
 		//	fmt.Printf("TCP error: %s\n", err)
 		//}
 		//fmt.Printf("message:%+v\n", buf[:n])
-		if err := t.Decoder.Decode(conn, msg); err != nil {
+		if err := t.Decoder.Decode(conn, &rpc); err != nil {
 			fmt.Printf("TCP error: %s\n", err)
 			continue
 		}
-		msg.From = conn.RemoteAddr()
-
-		fmt.Printf("message:%+v\n", msg)
-
+		rpc.From = conn.RemoteAddr()
+		t.rpcch <- rpc
 	}
 }
